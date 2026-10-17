@@ -1,0 +1,6 @@
+{
+  "name": "StreamForge: Distributed Python Event Processor",
+  "description": "Distributed Python stream processing engine with Kafka partitioning, 20 parallel Faust workers, embedded RocksDB state stores, fault-tolerant rebalancing, and live topology monitoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
