@@ -1,17 +1,20 @@
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.api import routes
+from backend.app.storage.repository import EventRepository
 
 
 client = TestClient(app)
 
 
-def setup_function():
-    """Reset in-memory state before each test."""
-    routes.aggregator = routes.RollingTemperatureAggregator()
-    routes.latest_results.clear()
+@pytest.fixture(autouse=True)
+def reset_repository(tmp_path, monkeypatch):
+    """Give each test an isolated SQLite database."""
+    test_repository = EventRepository(tmp_path / "test_streamforge.db")
+    monkeypatch.setattr(routes, "repository", test_repository)
 
 
 def test_health_endpoint():
@@ -107,3 +110,60 @@ def test_different_trucks_are_processed_independently():
     assert response.json()["truck_id"] == "TRUCK-B"
     assert response.json()["average_temperature"] == 40.0
     assert response.json()["reading_count"] == 1
+
+
+def test_events_are_persisted_in_database():
+    event = {
+        "event_id": "event-persist-001",
+        "truck_id": "TRUCK-PERSIST",
+        "temperature": 32.0,
+        "timestamp": "2026-10-16T12:00:00Z",
+    }
+
+    response = client.post("/api/v1/events", json=event)
+
+    assert response.json()["accepted"] is True
+    assert routes.repository.get_event_count() == 1
+
+
+def test_database_rejects_duplicate_event_id():
+    first = {
+        "event_id": "shared-event-id",
+        "truck_id": "TRUCK-A",
+        "temperature": 25.0,
+        "timestamp": "2026-10-16T12:00:00Z",
+    }
+
+    second = {
+        "event_id": "shared-event-id",
+        "truck_id": "TRUCK-B",
+        "temperature": 35.0,
+        "timestamp": "2026-10-16T12:01:00Z",
+    }
+
+    client.post("/api/v1/events", json=first)
+    response = client.post("/api/v1/events", json=second)
+
+    assert response.json()["accepted"] is False
+    assert routes.repository.get_event_count() == 1
+
+
+def test_events_survive_repository_reinitialization(tmp_path):
+    db_path = tmp_path / "persistent_streamforge.db"
+
+    first_repository = EventRepository(db_path)
+
+    from backend.app.schemas.events import TemperatureEvent
+
+    event = TemperatureEvent(
+        event_id="event-restart-001",
+        truck_id="TRUCK-RESTART",
+        temperature=31.5,
+    )
+
+    assert first_repository.add_event(event) is True
+
+    # Simulate opening the same database again.
+    second_repository = EventRepository(db_path)
+
+    assert second_repository.get_event_count() == 1
