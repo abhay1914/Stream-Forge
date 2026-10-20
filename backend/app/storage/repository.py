@@ -24,8 +24,9 @@ class EventRepository:
         connection.row_factory = sqlite3.Row
         return connection
 
+    
     def initialize(self):
-        """Create the event table if it does not exist."""
+        """Create the event table and migrate older databases."""
         with self._connect() as connection:
             connection.execute(
                 """
@@ -38,6 +39,21 @@ class EventRepository:
                 """
             )
 
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(temperature_events)"
+                ).fetchall()
+            }
+
+            if "status" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE temperature_events
+                    ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'
+                    """
+                )
+
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -45,6 +61,88 @@ class EventRepository:
                 ON temperature_events (truck_id, timestamp)
                 """
             )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_temperature_events_status_timestamp
+                ON temperature_events (status, timestamp)
+                """
+            )
+
+        
+    def get_pending_events(self, limit=100):
+        """Fetch pending events in timestamp order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, truck_id, temperature, timestamp, status
+                FROM temperature_events
+                WHERE status = 'pending'
+                ORDER BY timestamp ASC, event_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def update_event_status(self, event_id, status):
+        """Update an event status if the requested transition is valid."""
+        allowed_statuses = {"pending", "processing", "processed", "failed"}
+
+        if status not in allowed_statuses:
+            raise ValueError(f"Invalid event status: {status}")
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE temperature_events
+                SET status = ?
+                WHERE event_id = ?
+                """,
+                (status, event_id),
+            )
+
+        return cursor.rowcount == 1
+
+    
+    def claim_pending_events(self, limit=100):
+        """Atomically claim pending events for one worker."""
+        if limit <= 0:
+            return []
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            rows = connection.execute(
+                """
+                SELECT event_id, truck_id, temperature, timestamp, status
+                FROM temperature_events
+                WHERE status = 'pending'
+                ORDER BY timestamp ASC, event_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+            event_ids = [row["event_id"] for row in rows]
+
+            if event_ids:
+                placeholders = ",".join("?" for _ in event_ids)
+                connection.execute(
+                    f"""
+                    UPDATE temperature_events
+                    SET status = 'processing'
+                    WHERE status = 'pending'
+                      AND event_id IN ({placeholders})
+                    """,
+                    event_ids,
+                )
+
+            return [dict(row) for row in rows]
+
+
 
     @staticmethod
     def _normalize_timestamp(timestamp):

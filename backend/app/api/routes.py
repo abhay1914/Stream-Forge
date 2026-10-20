@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from backend.app.schemas.events import TemperatureEvent
 from backend.app.storage.repository import EventRepository
+from backend.app.engine.worker import EventWorker
 
 
 router = APIRouter(
@@ -12,7 +13,6 @@ router = APIRouter(
 
 repository = EventRepository()
 WINDOW_MINUTES = 5
-
 
 @router.post("/events")
 def submit_event(event: TemperatureEvent):
@@ -63,3 +63,22 @@ def get_truck_temperature(truck_id: str):
         "reading_count": result["reading_count"],
         "window_minutes": WINDOW_MINUTES,
     }
+
+
+@router.post("/worker/process")
+def process_pending_events(limit: int = 100):
+    """Process a batch of pending temperature events."""
+    if limit < 1 or limit > 1000:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=422,
+            detail="limit must be between 1 and 1000",
+        )
+
+    worker = EventWorker(
+        repository=repository,
+        window_minutes=WINDOW_MINUTES,
+    )
+
+    return worker.process_pending_events(limit=limit)
