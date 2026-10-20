@@ -1,6 +1,9 @@
 StreamForge: Distributed Python Event Processor
+
 Domain: Distributed Systems & Big Data Engineering
+
 Use Case: High-throughput IoT cold chain fleet telemetry monitoring for 50,000 refrigerated trucks with fault-tolerant 5-minute rolling windowed aggregations, embedded RocksDB state stores, and automatic partition rebalancing.
+
 1. Problem Statement
 When Python developers need to process massive streams of data (e.g., millions of IoT sensor readings), they typically rely on Java/JVM-based engines like Apache Flink or Apache Spark Streaming. Building a pure-Python distributed stream processor that guarantees:
 Sub-25ms event processing latency
