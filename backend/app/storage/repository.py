@@ -54,6 +54,21 @@ class EventRepository:
                     """
                 )
 
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(temperature_events)"
+                    ).fetchall()
+            }
+
+            if "processing_started_at" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE temperature_events
+                    ADD COLUMN processing_started_at TEXT
+                    """
+                )
+
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -106,11 +121,17 @@ class EventRepository:
 
         return cursor.rowcount == 1
 
-    
-    def claim_pending_events(self, limit=100):
-        """Atomically claim pending events for one worker."""
+
+    def claim_pending_events(self, limit=100, recovery_timeout_minutes=10):
+        """Atomically claim pending or abandoned processing events."""
         if limit <= 0:
             return []
+
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        stale_before = (
+            now - timedelta(minutes=recovery_timeout_minutes)
+        ).isoformat()
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -120,10 +141,17 @@ class EventRepository:
                 SELECT event_id, truck_id, temperature, timestamp, status
                 FROM temperature_events
                 WHERE status = 'pending'
+                   OR (
+                        status = 'processing'
+                        AND (
+                            processing_started_at IS NULL
+                            OR processing_started_at <= ?
+                        )
+                   )
                 ORDER BY timestamp ASC, event_id ASC
                 LIMIT ?
                 """,
-                (limit,),
+                (stale_before, limit),
             ).fetchall()
 
             event_ids = [row["event_id"] for row in rows]
@@ -133,14 +161,26 @@ class EventRepository:
                 connection.execute(
                     f"""
                     UPDATE temperature_events
-                    SET status = 'processing'
-                    WHERE status = 'pending'
-                      AND event_id IN ({placeholders})
+                    SET status = 'processing',
+                        processing_started_at = ?
+                    WHERE event_id IN ({placeholders})
+                      AND (
+                          status = 'pending'
+                          OR (
+                              status = 'processing'
+                              AND (
+                                  processing_started_at IS NULL
+                                  OR processing_started_at <= ?
+                              )
+                          )
+                      )
                     """,
-                    event_ids,
+                    [now_text, *event_ids, stale_before],
                 )
 
-            return [dict(row) for row in rows]
+            claimed_events = [dict(row) for row in rows]
+
+        return claimed_events
 
 
 
@@ -151,7 +191,6 @@ class EventRepository:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
 
         return timestamp.astimezone(timezone.utc)
-
     def add_event(self, event):
         """Store an event, returning False if its ID already exists."""
         timestamp = self._normalize_timestamp(event.timestamp)
