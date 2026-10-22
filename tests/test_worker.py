@@ -1,5 +1,5 @@
 
-from datetime import datetime, timezone
+from datetime import datetime,  timedelta, timezone
 
 from backend.app.engine.worker import EventWorker
 from backend.app.schemas.events import TemperatureEvent
@@ -123,3 +123,71 @@ def test_worker_marks_failed_event_and_continues(tmp_path, monkeypatch):
     assert summary["failed"] == 2
     assert summary["processed"] == 0
     assert repository.get_pending_events() == []
+
+
+
+def test_stale_processing_event_can_be_reclaimed(tmp_path):
+    repository = EventRepository(tmp_path / "stale_event_test.db")
+
+    event = TemperatureEvent(
+        event_id="stale-event-001",
+        truck_id="TRUCK-STALE",
+        temperature=29.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    assert repository.add_event(event) is True
+
+    stale_time = (
+        datetime.now(timezone.utc) - timedelta(minutes=11)
+    ).isoformat()
+
+    with repository._connect() as connection:
+        connection.execute(
+            """
+            UPDATE temperature_events
+            SET status = 'processing',
+                processing_started_at = ?
+            WHERE event_id = ?
+            """,
+            (stale_time, event.event_id),
+        )
+
+    claimed = repository.claim_pending_events(
+        limit=100,
+        recovery_timeout_minutes=10,
+    )
+
+    assert len(claimed) == 1
+    assert claimed[0]["event_id"] == event.event_id
+
+
+def test_recently_processing_event_is_not_reclaimed(tmp_path):
+    repository = EventRepository(tmp_path / "recent_event_test.db")
+
+    event = TemperatureEvent(
+        event_id="recent-event-001",
+        truck_id="TRUCK-RECENT",
+        temperature=28.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    assert repository.add_event(event) is True
+
+    recent_time = datetime.now(timezone.utc).isoformat()
+
+    with repository._connect() as connection:
+        connection.execute(
+            """
+            UPDATE temperature_events
+            SET status = 'processing',
+                processing_started_at = ?
+            WHERE event_id = ?
+            """,
+            (recent_time, event.event_id),
+        )
+
+    claimed = repository.claim_pending_events(
+        limit=100,
+        recovery_timeout_minutes=10,
+    )
+
+    assert claimed == []
