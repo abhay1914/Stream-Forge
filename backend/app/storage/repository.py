@@ -283,3 +283,30 @@ class EventRepository:
             ).fetchone()
 
         return row["total"]
+
+
+    
+    def get_event_status_counts(self):
+        """Return counts for each event processing status."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM temperature_events
+                GROUP BY status
+                """
+            ).fetchall()
+
+        counts = {
+            "pending": 0,
+            "processing": 0,
+            "processed": 0,
+            "failed": 0,
+        }
+
+        for row in rows:
+            counts[row["status"]] = row["count"]
+
+        counts["total"] = sum(counts.values())
+        return counts
+

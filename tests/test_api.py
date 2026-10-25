@@ -167,3 +167,19 @@ def test_events_survive_repository_reinitialization(tmp_path):
     second_repository = EventRepository(db_path)
 
     assert second_repository.get_event_count() == 1
+
+
+def test_worker_stats_endpoint():
+    response = client.get("/api/v1/worker/stats")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data == {
+        "pending": 0,
+        "processing": 0,
+        "processed": 0,
+        "failed": 0,
+        "total": 0,
+    }

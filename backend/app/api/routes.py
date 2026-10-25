@@ -82,3 +82,10 @@ def process_pending_events(limit: int = 100):
     )
 
     return worker.process_pending_events(limit=limit)
+
+
+@router.get("/worker/stats")
+def get_worker_stats():
+    """Return event processing counts for monitoring."""
+    return repository.get_event_status_counts()
+

@@ -191,3 +191,38 @@ def test_recently_processing_event_is_not_reclaimed(tmp_path):
     )
 
     assert claimed == []
+
+
+
+def test_worker_stats_returns_event_status_counts(tmp_path):
+    repository = EventRepository(tmp_path / "worker_stats_test.db")
+
+    events = [
+        ("stats-pending", "pending"),
+        ("stats-processing", "processing"),
+        ("stats-processed", "processed"),
+        ("stats-failed", "failed"),
+    ]
+
+    for event_id, status in events:
+        event = TemperatureEvent(
+            event_id=event_id,
+            truck_id="TRUCK-STATS",
+            temperature=28.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        assert repository.add_event(event) is True
+
+        if status != "pending":
+            assert repository.update_event_status(event_id, status) is True
+
+    counts = repository.get_event_status_counts()
+
+    assert counts == {
+        "pending": 1,
+        "processing": 1,
+        "processed": 1,
+        "failed": 1,
+        "total": 4,
+    }
+
