@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from backend.app.schemas.events import TemperatureEvent
 from backend.app.storage.repository import EventRepository
 from backend.app.engine.worker import EventWorker
+from backend.app.engine.metrics import get_batch_metrics
 
 
 router = APIRouter(
@@ -84,8 +85,12 @@ def process_pending_events(limit: int = 100):
     return worker.process_pending_events(limit=limit)
 
 
+
 @router.get("/worker/stats")
 def get_worker_stats():
-    """Return event processing counts for monitoring."""
-    return repository.get_event_status_counts()
+    """Return event counts and the latest worker batch metrics."""
+    stats = repository.get_event_status_counts()
+    batch_metrics = get_batch_metrics()
 
+    stats["latest_batch"] = batch_metrics
+    return stats

@@ -1,6 +1,7 @@
 
 from datetime import datetime
-
+from time import perf_counter
+from backend.app.engine.metrics import record_batch_metrics
 from backend.app.storage.repository import EventRepository
 
 
@@ -19,10 +20,15 @@ class EventWorker:
             "found": len(events),
             "processed": 0,
             "failed": 0,
+            "processing_time_ms": 0.0,
+            "average_latency_ms": 0.0,
         }
+
+        total_latency_seconds = 0.0
 
         for event in events:
             event_id = event["event_id"]
+            started_at = perf_counter()
 
             try:
                 timestamp = datetime.fromisoformat(event["timestamp"])
@@ -46,4 +52,17 @@ class EventWorker:
                 self.repository.update_event_status(event_id, "failed")
                 summary["failed"] += 1
 
+            finally:
+                total_latency_seconds += perf_counter() - started_at
+
+        summary["processing_time_ms"] = round(
+            total_latency_seconds * 1000, 2
+        )
+
+        if summary["found"] > 0:
+            summary["average_latency_ms"] = round(
+                total_latency_seconds * 1000 / summary["found"], 2
+            )
+
+        record_batch_metrics(summary)
         return summary

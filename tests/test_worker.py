@@ -226,3 +226,37 @@ def test_worker_stats_returns_event_status_counts(tmp_path):
         "total": 4,
     }
 
+
+def test_worker_returns_processing_latency_metrics(tmp_path):
+    repository = EventRepository(tmp_path / "worker_latency_test.db")
+
+    event = TemperatureEvent(
+        event_id="latency-event-001",
+        truck_id="TRUCK-LATENCY",
+        temperature=28.5,
+        timestamp=datetime.now(timezone.utc),
+    )
+    assert repository.add_event(event) is True
+
+    worker = EventWorker(repository=repository)
+    summary = worker.process_pending_events()
+
+    assert summary["found"] == 1
+    assert summary["processed"] == 1
+    assert summary["failed"] == 0
+    assert summary["processing_time_ms"] >= 0
+    assert summary["average_latency_ms"] >= 0
+
+
+def test_empty_batch_returns_zero_latency_metrics(tmp_path):
+    repository = EventRepository(tmp_path / "empty_latency_test.db")
+    worker = EventWorker(repository=repository)
+
+    summary = worker.process_pending_events()
+
+    assert summary["found"] == 0
+    assert summary["processed"] == 0
+    assert summary["failed"] == 0
+    assert summary["processing_time_ms"] == 0.0
+    assert summary["average_latency_ms"] == 0.0
+
