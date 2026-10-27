@@ -169,6 +169,7 @@ def test_events_survive_repository_reinitialization(tmp_path):
     assert second_repository.get_event_count() == 1
 
 
+
 def test_worker_stats_endpoint():
     response = client.get("/api/v1/worker/stats")
 
@@ -176,10 +177,13 @@ def test_worker_stats_endpoint():
 
     data = response.json()
 
-    assert data == {
-        "pending": 0,
-        "processing": 0,
-        "processed": 0,
-        "failed": 0,
-        "total": 0,
-    }
+    assert data["pending"] == 0
+    assert data["processing"] == 0
+    assert data["processed"] == 0
+    assert data["failed"] == 0
+    assert data["total"] == 0
+
+    assert "latest_batch" in data
+    assert data["latest_batch"]["found"] == 0
+    assert data["latest_batch"]["processing_time_ms"] >= 0
+    assert data["latest_batch"]["average_latency_ms"] >= 0
