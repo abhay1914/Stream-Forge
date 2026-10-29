@@ -4,6 +4,7 @@ from datetime import datetime,  timedelta, timezone
 from backend.app.engine.worker import EventWorker
 from backend.app.schemas.events import TemperatureEvent
 from backend.app.storage.repository import EventRepository
+from concurrent.futures import ThreadPoolExecutor
 
 
 def test_worker_processes_pending_event(tmp_path):
@@ -91,38 +92,51 @@ def test_claim_pending_events_respects_limit(tmp_path):
     assert len(repository.get_pending_events()) == 1
 
 
+
 def test_worker_marks_failed_event_and_continues(tmp_path, monkeypatch):
     repository = EventRepository(tmp_path / "worker_failure_test.db")
 
-    for event_id, temperature in [
-        ("failure-event-001", 28.0),
-        ("failure-event-002", 30.0),
+    for event_id, truck_id in [
+        ("failure-event-001", "TRUCK-FAILURE"),
+        ("failure-event-002", "TRUCK-SUCCESS"),
     ]:
         event = TemperatureEvent(
             event_id=event_id,
-            truck_id="TRUCK-FAILURE",
-            temperature=temperature,
+            truck_id=truck_id,
+            temperature=28.0,
             timestamp=datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc),
         )
         assert repository.add_event(event) is True
 
     worker = EventWorker(repository=repository)
-
     original_average = repository.get_rolling_average
 
-    def fail_first_event(truck_id, event_timestamp, window_minutes=5):
+    def fail_only_first_truck(truck_id, event_timestamp, window_minutes=5):
         if truck_id == "TRUCK-FAILURE":
             raise RuntimeError("Simulated processing failure")
+
         return original_average(truck_id, event_timestamp, window_minutes)
 
-    monkeypatch.setattr(repository, "get_rolling_average", fail_first_event)
+    monkeypatch.setattr(
+        repository, "get_rolling_average", fail_only_first_truck
+    )
 
     summary = worker.process_pending_events()
 
     assert summary["found"] == 2
-    assert summary["failed"] == 2
-    assert summary["processed"] == 0
-    assert repository.get_pending_events() == []
+    assert summary["failed"] == 1
+    assert summary["processed"] == 1
+
+    with repository._connect() as connection:
+        statuses = {
+            row["event_id"]: row["status"]
+            for row in connection.execute(
+                "SELECT event_id, status FROM temperature_events"
+            ).fetchall()
+        }
+
+    assert statuses["failure-event-001"] == "failed"
+    assert statuses["failure-event-002"] == "processed"
 
 
 
@@ -259,4 +273,76 @@ def test_empty_batch_returns_zero_latency_metrics(tmp_path):
     assert summary["failed"] == 0
     assert summary["processing_time_ms"] == 0.0
     assert summary["average_latency_ms"] == 0.0
+
+
+def test_worker_continues_after_one_event_fails(tmp_path, monkeypatch):
+    repository = EventRepository(tmp_path / "worker_continue_test.db")
+
+    for event_id, truck_id in [
+        ("continue-event-001", "TRUCK-FAIL"),
+        ("continue-event-002", "TRUCK-OK"),
+    ]:
+        event = TemperatureEvent(
+            event_id=event_id,
+            truck_id=truck_id,
+            temperature=28.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        assert repository.add_event(event) is True
+
+    worker = EventWorker(repository=repository)
+    original_average = repository.get_rolling_average
+
+    def fail_only_first_truck(truck_id, event_timestamp, window_minutes=5):
+        if truck_id == "TRUCK-FAIL":
+            raise RuntimeError("Simulated processing failure")
+
+        return original_average(
+            truck_id, event_timestamp, window_minutes
+        )
+
+    monkeypatch.setattr(
+        repository, "get_rolling_average", fail_only_first_truck
+    )
+
+    summary = worker.process_pending_events()
+
+    assert summary["found"] == 2
+    assert summary["failed"] == 1
+    assert summary["processed"] == 1
+
+
+
+def test_concurrent_workers_do_not_claim_same_event(tmp_path):
+    database_path = tmp_path / "concurrent_claim_test.db"
+    repository = EventRepository(database_path)
+
+    event = TemperatureEvent(
+        event_id="concurrent-event-001",
+        truck_id="TRUCK-CONCURRENT",
+        temperature=28.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    assert repository.add_event(event) is True
+
+    def claim_events():
+        worker_repository = EventRepository(database_path)
+        return worker_repository.claim_pending_events(limit=1)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(claim_events)
+        second_future = executor.submit(claim_events)
+
+        first_claim = first_future.result()
+        second_claim = second_future.result()
+
+    claimed_ids = [
+        event["event_id"]
+        for batch in (first_claim, second_claim)
+        for event in batch
+    ]
+
+    assert claimed_ids.count("concurrent-event-001") == 1
+    assert len(first_claim) + len(second_claim) == 1
+
 
