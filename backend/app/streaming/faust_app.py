@@ -1,8 +1,12 @@
-﻿import logging
+
+import logging
+import os
+from pathlib import Path
 
 import faust
 from pydantic import ValidationError
 
+from backend.app.storage.state_store import RocksDBStateStore
 from backend.app.streaming.transforms import transform_temperature_event
 from backend.app.streaming.event_time_windows import EventTimeWindowAggregator
 
@@ -10,11 +14,53 @@ from backend.app.streaming.event_time_windows import EventTimeWindowAggregator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("streamforge.faust")
 
-# Five-minute event-time aggregation with one-minute allowed lateness
-window_aggregator = EventTimeWindowAggregator(
-    window_minutes=5,
-    allowed_lateness_minutes=1,
+# Persistent state directory can be overridden through an environment variable.
+STATE_DIR = Path(
+    os.getenv(
+        "STREAMFORGE_STATE_DIR",
+        str(Path.cwd() / "data" / "streamforge-rocksdb"),
+    )
 )
+
+state_store = None
+window_aggregator = None
+
+
+def initialize_state() -> None:
+    """Initialize RocksDB and restore the event-time aggregator."""
+    global state_store, window_aggregator
+
+    if state_store is not None:
+        return
+
+    logger.info("Opening RocksDB state store: %s", STATE_DIR)
+
+    state_store = RocksDBStateStore(STATE_DIR)
+
+    try:
+        window_aggregator = EventTimeWindowAggregator(
+            window_minutes=5,
+            allowed_lateness_minutes=1,
+            state_store=state_store,
+        )
+    except Exception:
+        state_store.close()
+        state_store = None
+        raise
+
+    logger.info("Persistent event-time state restored successfully")
+
+
+async def close_state() -> None:
+    """Flush and close persistent state during worker shutdown."""
+    global state_store, window_aggregator
+
+    if state_store is not None:
+        logger.info("Closing RocksDB state store")
+        state_store.close()
+        state_store = None
+        window_aggregator = None
+
 
 app = faust.App(
     "streamforge-week2-processor",
@@ -24,6 +70,9 @@ app = faust.App(
     consumer_auto_offset_reset="latest",
 )
 
+# Close the state store during graceful shutdown.
+app.on_before_shutdown.connect(close_state)
+
 # Existing input topic
 temperature_topic = app.topic(
     "temperature-events",
@@ -31,20 +80,20 @@ temperature_topic = app.topic(
     value_serializer="json",
 )
 
-# New output topics
+# Existing processed output
 processed_topic = app.topic(
     "temperature-events-processed",
     key_type=str,
     value_serializer="json",
 )
 
+# Invalid events
 dead_letter_topic = app.topic(
     "temperature-events-dead-letter",
     value_serializer="json",
 )
 
-
-# Five-minute finalized window results
+# Finalized five-minute windows
 window_topic = app.topic(
     "temperature-windows-5m",
     key_type=str,
@@ -57,6 +106,7 @@ late_events_topic = app.topic(
     key_type=str,
     value_serializer="json",
 )
+
 
 @app.agent(temperature_topic)
 async def process_temperature_events(events):
@@ -86,14 +136,23 @@ async def process_temperature_events(events):
             )
             continue
 
-        # Preserve the existing processed-event output.
+        # Initialize persistent state on the first valid event.
+        initialize_state()
+
+        # Process before publishing so duplicates are not republished.
+        result = window_aggregator.process(transformed)
+
+        if result["status"] == "duplicate":
+            logger.info(
+                "Duplicate event ignored: %s",
+                transformed["event_id"],
+            )
+            continue
+
         await processed_topic.send(
             key=transformed["truck_id"],
             value=transformed,
         )
-
-        # Process the event using its event timestamp.
-        result = window_aggregator.process(transformed)
 
         if result["status"] == "late":
             await late_events_topic.send(
@@ -109,14 +168,6 @@ async def process_temperature_events(events):
             )
             continue
 
-        if result["status"] == "duplicate":
-            logger.info(
-                "Duplicate event ignored: %s",
-                transformed["event_id"],
-            )
-            continue
-
-        # Publish every finalized five-minute window.
         for window_result in result["finalized_windows"]:
             await window_topic.send(
                 key=window_result["truck_id"],

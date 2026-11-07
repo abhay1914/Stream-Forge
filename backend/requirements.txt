@@ -5,3 +5,5 @@ kafka-python==3.0.12
 confluent-kafka==2.16.1
 pytest==9.2.0
 httpx==0.28.1
+rocksdict==0.3.29
+faust-streaming==0.15.4

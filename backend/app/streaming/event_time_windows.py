@@ -1,14 +1,24 @@
-﻿from collections import defaultdict
+
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from backend.app.storage.state_store import RocksDBStateStore
 
 
 class EventTimeWindowAggregator:
-    """Aggregate temperature events into fixed event-time windows."""
+    """Aggregate temperature events with optional persistent state."""
+
+    STATE_PREFIX = "streamforge:aggregator:"
+    WINDOWS_KEY = STATE_PREFIX + "windows"
+    WATERMARKS_KEY = STATE_PREFIX + "watermarks"
+    SEEN_IDS_KEY = STATE_PREFIX + "seen_ids"
 
     def __init__(
         self,
         window_minutes: int = 5,
         allowed_lateness_minutes: int = 1,
+        state_store: RocksDBStateStore | None = None,
     ):
         if window_minutes <= 0:
             raise ValueError("window_minutes must be positive")
@@ -20,10 +30,14 @@ class EventTimeWindowAggregator:
         self.allowed_lateness = timedelta(
             minutes=allowed_lateness_minutes
         )
+        self.state_store = state_store
 
         self._windows = defaultdict(dict)
         self._max_event_time = {}
         self._seen_ids = set()
+
+        if self.state_store is not None:
+            self._restore_state()
 
     @staticmethod
     def _normalize_timestamp(value):
@@ -68,8 +82,55 @@ class EventTimeWindowAggregator:
             "maximum_temperature": max(temperatures),
         }
 
+    def _restore_state(self) -> None:
+        """Restore unfinished windows, watermarks and deduplication IDs."""
+
+        windows = self.state_store.get(self.WINDOWS_KEY) or {}
+        watermarks = self.state_store.get(self.WATERMARKS_KEY) or {}
+        seen_ids = self.state_store.get(self.SEEN_IDS_KEY) or []
+
+        for truck_id, truck_windows in windows.items():
+            for start, events in truck_windows.items():
+                window_start = self._normalize_timestamp(start)
+                self._windows[truck_id][window_start] = events
+
+        self._max_event_time = {
+            truck_id: self._normalize_timestamp(timestamp)
+            for truck_id, timestamp in watermarks.items()
+        }
+
+        self._seen_ids = set(seen_ids)
+
+    def _persist_state(self) -> None:
+        """Atomically persist the complete aggregator state."""
+
+        if self.state_store is None:
+            return
+
+        windows = {
+            truck_id: {
+                start.isoformat(): events
+                for start, events in truck_windows.items()
+            }
+            for truck_id, truck_windows in self._windows.items()
+            if truck_windows
+        }
+
+        watermarks = {
+            truck_id: timestamp.isoformat()
+            for truck_id, timestamp in self._max_event_time.items()
+        }
+
+        self.state_store.write_batch(
+            puts={
+                self.WINDOWS_KEY: windows,
+                self.WATERMARKS_KEY: watermarks,
+                self.SEEN_IDS_KEY: sorted(self._seen_ids),
+            }
+        )
+
     def process(self, event: dict) -> dict:
-        """Accept an event and emit any windows closed by its watermark."""
+        """Accept an event and emit windows closed by its watermark."""
 
         event_id = event["event_id"]
         truck_id = event["truck_id"]
@@ -100,12 +161,22 @@ class EventTimeWindowAggregator:
                     "finalized_windows": [],
                 }
 
+        # Keep previous state in case persistence fails.
+        previous_seen_ids = self._seen_ids.copy()
+        previous_max_times = self._max_event_time.copy()
+        previous_windows = {
+            key: {
+                start: events.copy()
+                for start, events in truck_windows.items()
+            }
+            for key, truck_windows in self._windows.items()
+        }
+
         self._seen_ids.add(event_id)
 
         self._windows[truck_id][window_start] = (
             self._windows[truck_id].get(window_start, {})
         )
-
         self._windows[truck_id][window_start][event_id] = event
 
         if previous_max is None or timestamp > previous_max:
@@ -128,6 +199,14 @@ class EventTimeWindowAggregator:
                         events,
                     )
                 )
+
+        try:
+            self._persist_state()
+        except Exception:
+            self._seen_ids = previous_seen_ids
+            self._max_event_time = previous_max_times
+            self._windows = defaultdict(dict, previous_windows)
+            raise
 
         return {
             "status": "accepted",
