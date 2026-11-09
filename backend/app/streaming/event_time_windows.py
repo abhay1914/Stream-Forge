@@ -1,5 +1,5 @@
-
-from collections import defaultdict
+﻿from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -101,8 +101,11 @@ class EventTimeWindowAggregator:
 
         self._seen_ids = set(seen_ids)
 
-    def _persist_state(self) -> None:
-        """Atomically persist the complete aggregator state."""
+    def _persist_state(
+        self,
+        extra_puts: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist aggregator state and additional records."""
 
         if self.state_store is None:
             return
@@ -121,16 +124,23 @@ class EventTimeWindowAggregator:
             for truck_id, timestamp in self._max_event_time.items()
         }
 
-        self.state_store.write_batch(
-            puts={
-                self.WINDOWS_KEY: windows,
-                self.WATERMARKS_KEY: watermarks,
-                self.SEEN_IDS_KEY: sorted(self._seen_ids),
-            }
-        )
+        puts = {
+            self.WINDOWS_KEY: windows,
+            self.WATERMARKS_KEY: watermarks,
+            self.SEEN_IDS_KEY: sorted(self._seen_ids),
+        }
 
-    def process(self, event: dict) -> dict:
-        """Accept an event and emit windows closed by its watermark."""
+        if extra_puts:
+            puts.update(extra_puts)
+
+        self.state_store.write_batch(puts=puts)
+
+    def process(
+        self,
+        event: dict,
+        extra_puts_factory: Callable[[dict], dict[str, Any]] | None = None,
+    ) -> dict:
+        """Accept an event and atomically persist state and extra records."""
 
         event_id = event["event_id"]
         truck_id = event["truck_id"]
@@ -151,7 +161,7 @@ class EventTimeWindowAggregator:
             watermark = previous_max - self.allowed_lateness
 
             if window_end <= watermark:
-                return {
+                late_result = {
                     "status": "late",
                     "event_id": event_id,
                     "truck_id": truck_id,
@@ -160,6 +170,13 @@ class EventTimeWindowAggregator:
                     "watermark": watermark.isoformat(),
                     "finalized_windows": [],
                 }
+
+                if extra_puts_factory and self.state_store is not None:
+                    extra_puts = extra_puts_factory(late_result)
+                    if extra_puts:
+                        self.state_store.write_batch(puts=extra_puts)
+
+                return late_result
 
         # Keep previous state in case persistence fails.
         previous_seen_ids = self._seen_ids.copy()
@@ -201,16 +218,25 @@ class EventTimeWindowAggregator:
                 )
 
         try:
-            self._persist_state()
+            result = {
+                "status": "accepted",
+                "event_id": event_id,
+                "truck_id": truck_id,
+                "finalized_windows": finalized,
+            }
+
+            extra_puts = (
+                extra_puts_factory(result)
+                if extra_puts_factory
+                else None
+            )
+
+            self._persist_state(extra_puts=extra_puts)
+
         except Exception:
             self._seen_ids = previous_seen_ids
             self._max_event_time = previous_max_times
             self._windows = defaultdict(dict, previous_windows)
             raise
 
-        return {
-            "status": "accepted",
-            "event_id": event_id,
-            "truck_id": truck_id,
-            "finalized_windows": finalized,
-        }
+        return result
