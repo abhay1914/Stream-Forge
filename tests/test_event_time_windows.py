@@ -211,3 +211,89 @@ def test_watermark_survives_restart(tmp_path):
     assert result["status"] == "late"
 
     store.close()
+
+def test_late_event_is_deduplicated_in_memory():
+    instance = EventTimeWindowAggregator(
+        window_minutes=5,
+        allowed_lateness_minutes=1,
+    )
+
+    instance.process(
+        make_event("late-watermark", "2026-11-05T10:06:01+00:00")
+    )
+
+    late_event = make_event(
+        "late-duplicate",
+        "2026-11-05T10:04:59+00:00",
+    )
+
+    assert instance.process(late_event)["status"] == "late"
+    assert instance.process(late_event)["status"] == "duplicate"
+
+
+def test_late_event_deduplication_survives_restart(tmp_path):
+    db_path = tmp_path / "late-deduplication"
+
+    store = RocksDBStateStore(db_path)
+    instance = EventTimeWindowAggregator(
+        window_minutes=5,
+        allowed_lateness_minutes=1,
+        state_store=store,
+    )
+
+    instance.process(
+        make_event("late-restart-watermark", "2026-11-05T10:06:01+00:00")
+    )
+
+    late_event = make_event(
+        "late-restart-duplicate",
+        "2026-11-05T10:04:59+00:00",
+    )
+
+    assert instance.process(late_event)["status"] == "late"
+    store.close()
+
+    store = RocksDBStateStore(db_path)
+    recovered = EventTimeWindowAggregator(
+        window_minutes=5,
+        allowed_lateness_minutes=1,
+        state_store=store,
+    )
+
+    assert recovered.process(late_event)["status"] == "duplicate"
+    store.close()
+
+
+def test_late_event_deduplication_rolls_back_when_persistence_fails(
+    monkeypatch,
+):
+    instance = EventTimeWindowAggregator(
+        window_minutes=5,
+        allowed_lateness_minutes=1,
+    )
+
+    instance.process(
+        make_event("rollback-watermark", "2026-11-05T10:06:01+00:00")
+    )
+
+    late_event = make_event(
+        "rollback-late-event",
+        "2026-11-05T10:04:59+00:00",
+    )
+
+    original_persist = instance._persist_state
+
+    def fail_persist(*args, **kwargs):
+        raise RuntimeError("Simulated persistence failure")
+
+    monkeypatch.setattr(instance, "_persist_state", fail_persist)
+
+    with pytest.raises(RuntimeError, match="Simulated persistence failure"):
+        instance.process(late_event)
+
+    monkeypatch.setattr(instance, "_persist_state", original_persist)
+
+    retry_result = instance.process(late_event)
+
+    assert retry_result["status"] == "late"
+    assert instance.process(late_event)["status"] == "duplicate"
