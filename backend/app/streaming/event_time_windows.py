@@ -171,10 +171,21 @@ class EventTimeWindowAggregator:
                     "finalized_windows": [],
                 }
 
-                if extra_puts_factory and self.state_store is not None:
-                    extra_puts = extra_puts_factory(late_result)
-                    if extra_puts:
-                        self.state_store.write_batch(puts=extra_puts)
+                # Persist late-event deduplication and outbox records
+                # together so retries cannot emit the same late event again.
+                previous_seen_ids = self._seen_ids.copy()
+                self._seen_ids.add(event_id)
+
+                try:
+                    extra_puts = (
+                        extra_puts_factory(late_result)
+                        if extra_puts_factory
+                        else None
+                    )
+                    self._persist_state(extra_puts=extra_puts)
+                except Exception:
+                    self._seen_ids = previous_seen_ids
+                    raise
 
                 return late_result
 
