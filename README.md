@@ -2,12 +2,17 @@ StreamForge: Distributed Python Event Processor
 
 Domain: Distributed Systems & Big Data Engineering
 
-Use Case: High-throughput IoT cold chain fleet telemetry monitoring for 50,000 refrigerated trucks with fault-tolerant 5-minute rolling windowed aggregations, embedded RocksDB state stores, and automatic partition rebalancing.
 
-1. Problem Statement
-When Python developers need to process massive streams of data (e.g., millions of IoT sensor readings), they typically rely on Java/JVM-based engines like Apache Flink or Apache Spark Streaming. Building a pure-Python distributed stream processor that guarantees:
-Sub-25ms event processing latency
-Embedded state management with low memory overhead
-Dynamic partition rebalancing without stop-the-world pauses
-Strict Exactly-Once Processing Semantics (EOS) during node failures
-...has historically been difficult. StreamForge solves this problem by pairing Apache Kafka partitioned logs with Faust / Bytewax, an embedded RocksDB key-value storage engine, and a FastAPI + React Flow topology control plane.
+Problem Statement: When Python developers need to process massive streams of data (e.g., millions of 
+IoT sensor readings), they typically rely on Java-based frameworks like Apache Flink or Spark. Building a 
+pure-Python distributed stream processor that handles fault tolerance, state management, and strict 
+exactly-once processing semantics is incredibly difficult.
+
+
+Use Case: An IoT fleet manager needs to aggregate temperature data from 50,000 trucks every 10 
+seconds. They deploy StreamForge, a custom Python streaming engine built on top of Apache Kafka and 
+Faust. The backend spins up 20 parallel Python worker nodes. The engine partitions the incoming data 
+stream. As the trucks send data, the Python workers perform "Windowed Aggregations" (calculating the 
+5-minute rolling average temperature per truck). If Worker Node #4 crashes, StreamForge automatically 
+rebalances the partition to Worker #5 and recovers its state from a RocksDB changelog, ensuring no 
+sensor reading is ever dropped or processed twice.
