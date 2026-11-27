@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.api import routes
+from backend.app.engine import metrics
 from backend.app.storage.repository import EventRepository
 
 
@@ -15,6 +16,7 @@ def reset_repository(tmp_path, monkeypatch):
     """Give each test an isolated SQLite database."""
     test_repository = EventRepository(tmp_path / "test_streamforge.db")
     monkeypatch.setattr(routes, "repository", test_repository)
+    monkeypatch.setattr(metrics, "_latest_batch_metrics", {"found": 0, "processed": 0, "failed": 0, "processing_time_ms": 0.0, "average_latency_ms": 0.0})
 
 
 def test_health_endpoint():
@@ -187,3 +189,12 @@ def test_worker_stats_endpoint():
     assert data["latest_batch"]["found"] == 0
     assert data["latest_batch"]["processing_time_ms"] >= 0
     assert data["latest_batch"]["average_latency_ms"] >= 0
+
+
+def test_prometheus_metrics_endpoint():
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "# HELP streamforge_events_found" in response.text
+    assert "# TYPE streamforge_batch_processing_duration_seconds histogram" in response.text

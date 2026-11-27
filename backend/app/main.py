@@ -4,10 +4,11 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from backend.app.api.routes import router
 from backend.app.engine.worker import EventWorker
+from backend.app.engine.metrics import get_prometheus_metrics
 from backend.app.storage.repository import EventRepository
 
 
@@ -80,3 +81,12 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    payload, content_type = get_prometheus_metrics()
+    return Response(
+        content=payload,
+        headers={"Content-Type": content_type},
+    )
