@@ -1,0 +1,42 @@
+groups:
+  - name: streamforge_alerts
+    rules:
+      - alert: StreamForgeTargetDown
+        expr: up{job="streamforge"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: streamforge
+        annotations:
+          summary: StreamForge metrics endpoint is unavailable
+          description: Prometheus cannot scrape the StreamForge application metrics endpoint.
+
+      - alert: StreamForgeProcessingFailures
+        expr: increase(streamforge_events_failed_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: streamforge
+        annotations:
+          summary: StreamForge worker processing failures detected
+          description: One or more events failed processing during the last five minutes.
+
+      - alert: StreamForgeWorkerInactive
+        expr: streamforge_worker_last_run_timestamp_seconds > 0 and (time() - streamforge_worker_last_run_timestamp_seconds) > 300
+        for: 1m
+        labels:
+          severity: warning
+          service: streamforge
+        annotations:
+          summary: StreamForge worker has been inactive
+          description: No worker batch has completed for more than five minutes.
+
+      - alert: StreamForgeHighBatchLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(streamforge_batch_processing_duration_seconds_bucket[5m]))) > 1
+        for: 2m
+        labels:
+          severity: warning
+          service: streamforge
+        annotations:
+          summary: StreamForge batch processing latency is high
+          description: The estimated 95th percentile batch processing duration is above one second.
